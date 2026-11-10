@@ -1085,13 +1085,9 @@ body {
   }
 
   .quick-btn {
-    padding: 0.55rem 0.3rem;
+    padding: 0.55rem 0.25rem;
     text-align: center;
-    font-size: 0.8rem;
-  }
-
-  #btn-usar-saldo-total {
-    grid-column: span 2;
+    font-size: 0.78rem;
   }
 
   .receipt-banner {
