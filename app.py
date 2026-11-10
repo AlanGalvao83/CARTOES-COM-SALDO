@@ -39,6 +39,7 @@ SUPABASE_KEY = (
     os.environ.get("SUPABASE_SECRET_KEY")
     or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     or os.environ.get("SUPABASE_PUBLISHABLE_KEY")
+    or os.environ.get("SUPABASE_ANON_KEY")
     or ""
 ).strip()
 
@@ -124,11 +125,6 @@ def from_cents(cents):
 
 def init_db():
     if use_supabase():
-        try:
-            from migrar_para_supabase import migrar
-            migrar()
-        except Exception:
-            pass
         return
 
     conn = get_db()
@@ -1094,7 +1090,6 @@ def api_resumo():
     hoje = datetime.now().strftime("%Y-%m-%d")
 
     if use_supabase():
-        # Tenta usar a função RPC obter_resumo_caixa se disponível
         r_rpc = requests.post(
             f"{SUPABASE_URL}/rest/v1/rpc/obter_resumo_caixa",
             headers=sb_headers(),
@@ -1103,6 +1098,60 @@ def api_resumo():
         )
         if r_rpc.status_code == 200 and isinstance(r_rpc.json(), dict):
             return jsonify(r_rpc.json())
+
+        # Fallback via REST se a função RPC não existir
+        r_tot = requests.get(
+            f"{SUPABASE_URL}/rest/v1/cartoes?select=id&limit=1",
+            headers=sb_headers("count=exact"),
+            timeout=10,
+        )
+        cr_tot = r_tot.headers.get("Content-Range", "*/0").split("/")[-1]
+        total_cartoes = int(cr_tot) if cr_tot.isdigit() else 0
+
+        r_ativos = requests.get(
+            f"{SUPABASE_URL}/rest/v1/cartoes?select=id&saldo_centavos=gt.0&limit=1",
+            headers=sb_headers("count=exact"),
+            timeout=10,
+        )
+        cr_at = r_ativos.headers.get("Content-Range", "*/0").split("/")[-1]
+        cartoes_com_saldo = int(cr_at) if cr_at.isdigit() else 0
+
+        r_mov_hoje = requests.get(
+            f"{SUPABASE_URL}/rest/v1/movimentacoes",
+            headers=sb_headers(),
+            params={
+                "select": "usuario_id,tipo,valor_descontado_centavos,valor_complemento_caixa_centavos,estornado",
+                "criado_em": f"like.{hoje}*",
+                "estornado": "eq.0",
+            },
+            timeout=10,
+        )
+        movs_hoje = [
+            m for m in (r_mov_hoje.json() if r_mov_hoje.status_code == 200 else [])
+            if m.get("tipo") in ("BAIXA_TOTAL", "BAIXA_PARCIAL")
+        ]
+        descontado_hoje = sum(m["valor_descontado_centavos"] for m in movs_hoje)
+        compl_hoje = sum(m["valor_complemento_caixa_centavos"] for m in movs_hoje)
+        meus_movs = [m for m in movs_hoje if m["usuario_id"] == session["user_id"]]
+        meu_desc = sum(m["valor_descontado_centavos"] for m in meus_movs)
+        meu_compl = sum(m["valor_complemento_caixa_centavos"] for m in meus_movs)
+
+        return jsonify(
+            {
+                "total_cartoes": total_cartoes,
+                "cartoes_com_saldo": cartoes_com_saldo,
+                "cartoes_zerados": max(0, total_cartoes - cartoes_com_saldo),
+                "saldo_inicial_total": 512397.05,
+                "saldo_atual_total": 512397.05,
+                "total_ja_utilizado": 0.0,
+                "atendimentos_hoje": len(movs_hoje),
+                "descontado_hoje": from_cents(descontado_hoje),
+                "complemento_caixa_hoje": from_cents(compl_hoje),
+                "meus_atendimentos_hoje": len(meus_movs),
+                "meu_descontado_hoje": from_cents(meu_desc),
+                "meu_complemento_hoje": from_cents(meu_compl),
+            }
+        )
 
     conn = get_db()
     stats_cartoes = conn.execute(

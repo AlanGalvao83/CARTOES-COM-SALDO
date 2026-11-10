@@ -116,7 +116,9 @@ function enterApp() {
 
   loadResumo();
   loadListaRapida("");
-  document.getElementById("input-numero-cartao").focus();
+  if (window.innerWidth > 980) {
+    document.getElementById("input-numero-cartao").focus();
+  }
 }
 
 // ==================== RESUMO / KPIS ====================
@@ -126,7 +128,7 @@ async function loadResumo() {
     document.getElementById("kpi-cartoes-ativos").textContent =
       r.cartoes_com_saldo.toLocaleString("pt-BR");
     document.getElementById("kpi-cartoes-zerados").textContent =
-      `de ${r.total_cartoes.toLocaleString("pt-BR")} cartões (${r.cartoes_zerados} zerados)`;
+      `de ${r.total_cartoes.toLocaleString("pt-BR")} (${r.cartoes_zerados} zerados)`;
 
     document.getElementById("kpi-saldo-total").textContent = formatBRL(r.saldo_atual_total);
     document.getElementById("kpi-total-utilizado").textContent =
@@ -134,11 +136,11 @@ async function loadResumo() {
 
     document.getElementById("kpi-descontado-hoje").textContent = formatBRL(r.descontado_hoje);
     document.getElementById("kpi-atendimentos-hoje").textContent =
-      `${r.atendimentos_hoje} baixa(s) realizada(s) hoje`;
+      `${r.atendimentos_hoje} baixa(s) hoje`;
 
     document.getElementById("kpi-meu-descontado").textContent = formatBRL(r.meu_descontado_hoje);
     document.getElementById("kpi-meu-complemento").textContent =
-      `Compl. cobrado no caixa: ${formatBRL(r.meu_complemento_hoje)}`;
+      `Compl. caixa: ${formatBRL(r.meu_complemento_hoje)}`;
   } catch (e) {
     console.error(e);
   }
@@ -195,7 +197,6 @@ async function buscarCartaoDireto(termo) {
     return;
   }
 
-  // Se digitou apenas números, tenta buscar direto o número exato primeiro
   if (/^\d+$/.test(limpo)) {
     try {
       const data = await apiFetch(`/api/cartoes/numero/${limpo}`);
@@ -203,7 +204,6 @@ async function buscarCartaoDireto(termo) {
       loadListaRapida(limpo);
       return;
     } catch (err) {
-      // Se não achou número exato, faz busca aproximada
       const busca = await apiFetch(
         `/api/cartoes/busca?q=${encodeURIComponent(limpo)}&limit=25`
       );
@@ -211,13 +211,12 @@ async function buscarCartaoDireto(termo) {
       if (busca.cartoes && busca.cartoes.length === 1) {
         selecionarCartaoPorId(busca.cartoes[0].id);
       } else {
-        showToast(`Cartão nº ${limpo} não encontrado exatamente. Veja a lista lateral.`, "error");
+        showToast(`Cartão nº ${limpo} não encontrado exatamente. Veja a lista.`, "error");
       }
       return;
     }
   }
 
-  // Busca por nome
   const data = await apiFetch(
     `/api/cartoes/busca?q=${encodeURIComponent(limpo)}&limit=25`
   );
@@ -248,7 +247,6 @@ function exibirCartaoNoPDV(cartao, historico = [], duplicados = []) {
   document.getElementById("pdv-empty-state").classList.add("hidden");
   document.getElementById("pdv-card-content").classList.remove("hidden");
 
-  // Aviso de duplicados (ex: cartão 54934 na planilha)
   const dupWarning = document.getElementById("pdv-duplicate-warning");
   const dupBtns = document.getElementById("pdv-duplicate-buttons");
   if (duplicados && duplicados.length > 1) {
@@ -257,9 +255,7 @@ function exibirCartaoNoPDV(cartao, historico = [], duplicados = []) {
     duplicados.forEach((d, idx) => {
       const b = document.createElement("button");
       b.type = "button";
-      b.className = `btn ${d.id === cartao.id ? "btn-primary" : "btn-outline"}`;
-      b.style.padding = "0.35rem 0.75rem";
-      b.style.fontSize = "0.8rem";
+      b.className = `btn btn-sm ${d.id === cartao.id ? "btn-primary" : "btn-outline"}`;
       b.textContent = `Registro #${idx + 1} — Saldo: ${formatBRL(d.saldo)} (Início: ${formatDateBR(d.data_inicio)})`;
       b.addEventListener("click", () => selecionarCartaoPorId(d.id));
       dupBtns.appendChild(b);
@@ -268,7 +264,6 @@ function exibirCartaoNoPDV(cartao, historico = [], duplicados = []) {
     dupWarning.classList.add("hidden");
   }
 
-  // Dados principais do cartão
   document.getElementById("card-display-numero").textContent = `Nº ${cartao.numero}`;
   document.getElementById("card-display-grupo").textContent = cartao.grupo;
   document.getElementById("card-display-saldo-inicial").textContent = formatBRL(cartao.saldo_inicial);
@@ -289,7 +284,6 @@ function exibirCartaoNoPDV(cartao, historico = [], duplicados = []) {
     document.getElementById("box-cartao-zerado").classList.remove("hidden");
   }
 
-  // Nome / Cadastro
   const inputNome = document.getElementById("input-card-nome");
   const badgeCadastro = document.getElementById("badge-atualizar-cadastro");
   if (cartao.precisa_atualizar_nome) {
@@ -301,7 +295,6 @@ function exibirCartaoNoPDV(cartao, historico = [], duplicados = []) {
     badgeCadastro.classList.add("hidden");
   }
 
-  // Limpa campos de lançamento e foca no valor da estadia
   const inputValor = document.getElementById("input-valor-estadia");
   inputValor.value = "";
   document.getElementById("input-obs-estadia").value = "";
@@ -309,7 +302,12 @@ function exibirCartaoNoPDV(cartao, historico = [], duplicados = []) {
 
   renderHistoricoCartao(historico);
 
-  if (cartao.saldo > 0) {
+  // Em telas móveis/tablets, rola suavemente direto para os detalhes do cartão
+  if (window.innerWidth <= 980) {
+    document
+      .getElementById("panel-detalhe-cartao")
+      .scrollIntoView({ behavior: "smooth", block: "start" });
+  } else if (cartao.saldo > 0) {
     setTimeout(() => inputValor.focus(), 50);
   }
 }
@@ -422,8 +420,8 @@ function exibirBannerComprovante(mov, cartao) {
 
   details.innerHTML = `
     Estadia: <strong>${formatBRL(mov.valor_estadia)}</strong> |
-    Descontado do Cartão: <strong>${formatBRL(mov.valor_descontado)}</strong> |
-    Saldo Remanescente: <strong>${formatBRL(mov.saldo_posterior)}</strong> |
+    Descontado: <strong>${formatBRL(mov.valor_descontado)}</strong> |
+    Novo Saldo: <strong>${formatBRL(mov.saldo_posterior)}</strong> |
     Cobrar no Caixa: <strong style="color: ${mov.valor_complemento_caixa > 0 ? "#fbbf24" : "#34d399"};">${formatBRL(mov.valor_complemento_caixa)}</strong>
   `;
 }
@@ -478,7 +476,7 @@ function renderHistoricoCartao(historico) {
   tbody.innerHTML = "";
 
   if (!historico || !historico.length) {
-    tbody.innerHTML = `<tr><td colspan="9" style="text-align:center; color: var(--text-muted); padding: 1.25rem;">Nenhuma utilização registrada para este cartão até o momento.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" data-label="Histórico" style="text-align:center; color: var(--text-muted); padding: 1.25rem;">Nenhuma utilização registrada para este cartão até o momento.</td></tr>`;
     return;
   }
 
@@ -496,19 +494,19 @@ function renderHistoricoCartao(historico) {
     const podeEstornar = !m.estornado && m.tipo !== "ESTORNO";
 
     tr.innerHTML = `
-      <td>${formatDateBR(m.criado_em)}</td>
-      <td>${m.usuario_nome}</td>
-      <td>${badgeTipo}</td>
-      <td>${formatBRL(m.valor_estadia)}</td>
-      <td style="font-weight: 700; color: ${m.tipo === "ESTORNO" ? "#34d399" : "#38bdf8"};">
+      <td data-label="Data / Hora">${formatDateBR(m.criado_em)}</td>
+      <td data-label="Operadora">${m.usuario_nome}</td>
+      <td data-label="Tipo">${badgeTipo}</td>
+      <td data-label="Estadia">${formatBRL(m.valor_estadia)}</td>
+      <td data-label="Descontado" style="font-weight: 700; color: ${m.tipo === "ESTORNO" ? "#34d399" : "#38bdf8"};">
         ${m.tipo === "ESTORNO" ? "+" : "-"} ${formatBRL(m.valor_descontado)}
       </td>
-      <td style="color: ${m.valor_complemento_caixa > 0 ? "#fbbf24" : "var(--text-muted)"}; font-weight: 600;">
+      <td data-label="Cobrado Caixa" style="color: ${m.valor_complemento_caixa > 0 ? "#fbbf24" : "var(--text-muted)"}; font-weight: 600;">
         ${formatBRL(m.valor_complemento_caixa)}
       </td>
-      <td style="font-weight: 700;">${formatBRL(m.saldo_posterior)}</td>
-      <td>${m.observacao || "—"}</td>
-      <td>
+      <td data-label="Saldo Após" style="font-weight: 700;">${formatBRL(m.saldo_posterior)}</td>
+      <td data-label="Obs">${m.observacao || "—"}</td>
+      <td data-label="Ação">
         ${
           podeEstornar
             ? `<button type="button" class="btn btn-danger-outline" data-estornar="${m.id}">Estornar</button>`
@@ -572,7 +570,7 @@ async function carregarHistoricoGeral() {
     tbody.innerHTML = "";
 
     if (!data.movimentacoes.length) {
-      tbody.innerHTML = `<tr><td colspan="11" style="text-align:center; padding: 1.5rem; color: var(--text-muted);">Nenhuma movimentação encontrada para os filtros selecionados.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="11" data-label="Histórico" style="text-align:center; padding: 1.5rem; color: var(--text-muted);">Nenhuma movimentação encontrada para os filtros selecionados.</td></tr>`;
       return;
     }
 
@@ -590,17 +588,17 @@ async function carregarHistoricoGeral() {
       const podeEstornar = !m.estornado && m.tipo !== "ESTORNO";
 
       tr.innerHTML = `
-        <td>#${m.id}</td>
-        <td>${formatDateBR(m.criado_em)}</td>
-        <td><strong style="color:#38bdf8; cursor:pointer;" data-abrir-cartao="${m.cartao_id}">Nº ${m.cartao_numero}</strong></td>
-        <td>${m.usuario_nome}</td>
-        <td>${badgeTipo}</td>
-        <td>${formatBRL(m.valor_estadia)}</td>
-        <td style="font-weight:700;">${formatBRL(m.valor_descontado)}</td>
-        <td style="color:${m.valor_complemento_caixa > 0 ? "#fbbf24" : "inherit"}; font-weight:600;">${formatBRL(m.valor_complemento_caixa)}</td>
-        <td>${formatBRL(m.saldo_anterior)} → <strong>${formatBRL(m.saldo_posterior)}</strong></td>
-        <td>${m.observacao || "—"}</td>
-        <td>
+        <td data-label="#">#${m.id}</td>
+        <td data-label="Data / Hora">${formatDateBR(m.criado_em)}</td>
+        <td data-label="Cartão Nº"><strong style="color:#38bdf8; cursor:pointer;" data-abrir-cartao="${m.cartao_id}">Nº ${m.cartao_numero}</strong></td>
+        <td data-label="Operadora">${m.usuario_nome}</td>
+        <td data-label="Tipo">${badgeTipo}</td>
+        <td data-label="Valor Estadia">${formatBRL(m.valor_estadia)}</td>
+        <td data-label="Descontado Cartão" style="font-weight:700;">${formatBRL(m.valor_descontado)}</td>
+        <td data-label="Cobrado Caixa" style="color:${m.valor_complemento_caixa > 0 ? "#fbbf24" : "inherit"}; font-weight:600;">${formatBRL(m.valor_complemento_caixa)}</td>
+        <td data-label="Saldo Ant. → Final">${formatBRL(m.saldo_anterior)} → <strong>${formatBRL(m.saldo_posterior)}</strong></td>
+        <td data-label="Observação">${m.observacao || "—"}</td>
+        <td data-label="Ação">
           ${
             podeEstornar
               ? `<button type="button" class="btn btn-danger-outline" data-estornar-geral="${m.id}">Estornar</button>`
@@ -644,26 +642,26 @@ async function carregarBaseCartoes() {
     tbody.innerHTML = "";
 
     if (!data.cartoes.length) {
-      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding: 1.5rem; color: var(--text-muted);">Nenhum cartão encontrado.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" data-label="Resultado" style="text-align:center; padding: 1.5rem; color: var(--text-muted);">Nenhum cartão encontrado.</td></tr>`;
       return;
     }
 
     data.cartoes.forEach((c) => {
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td><strong style="color:#38bdf8; font-size:1rem;">Nº ${c.numero}</strong></td>
-        <td>${c.grupo}</td>
-        <td>${c.nome || '<span style="color:var(--text-muted)">Não informado</span>'}</td>
-        <td>${formatBRL(c.saldo_inicial)}</td>
-        <td>
+        <td data-label="Cartão Nº"><strong style="color:#38bdf8; font-size:1rem;">Nº ${c.numero}</strong></td>
+        <td data-label="Grupo">${c.grupo}</td>
+        <td data-label="Nome / Cadastro">${c.nome || '<span style="color:var(--text-muted)">Não informado</span>'}</td>
+        <td data-label="Saldo Inicial">${formatBRL(c.saldo_inicial)}</td>
+        <td data-label="Saldo Atual">
           <span class="search-item-balance ${c.saldo > 0 ? "balance-positive" : "balance-zero"}">
             ${formatBRL(c.saldo)}
           </span>
         </td>
-        <td>${formatDateBR(c.data_inicio)}</td>
-        <td>${formatDateBR(c.data_fim)}</td>
-        <td>
-          <button type="button" class="btn btn-primary" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;" data-atender="${c.id}">
+        <td data-label="Início">${formatDateBR(c.data_inicio)}</td>
+        <td data-label="Fim">${formatDateBR(c.data_fim)}</td>
+        <td data-label="Ação">
+          <button type="button" class="btn btn-primary btn-sm" data-atender="${c.id}">
             Abrir no Caixa
           </button>
         </td>
@@ -692,10 +690,10 @@ async function carregarUsuariosAdmin() {
     data.usuarios.forEach((u) => {
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td><code>${u.username}</code></td>
-        <td>${u.nome}</td>
-        <td><span class="role-pill ${u.perfil === "admin" ? "admin" : ""}">${u.perfil}</span></td>
-        <td>${u.ativo ? "Ativo" : "Inativo"}</td>
+        <td data-label="Login"><code>${u.username}</code></td>
+        <td data-label="Nome">${u.nome}</td>
+        <td data-label="Perfil"><span class="role-pill ${u.perfil === "admin" ? "admin" : ""}">${u.perfil}</span></td>
+        <td data-label="Status">${u.ativo ? "Ativo" : "Inativo"}</td>
       `;
       tbody.appendChild(tr);
     });
@@ -714,7 +712,9 @@ function switchTab(tabId) {
   });
 
   if (tabId === "tab-pdv") {
-    document.getElementById("input-numero-cartao").focus();
+    if (window.innerWidth > 980) {
+      document.getElementById("input-numero-cartao").focus();
+    }
   } else if (tabId === "tab-historico") {
     carregarHistoricoGeral();
   } else if (tabId === "tab-cartoes") {
@@ -763,6 +763,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const inputBusca = document.getElementById("input-numero-cartao");
   document.getElementById("form-busca-rapida").addEventListener("submit", (e) => {
     e.preventDefault();
+    inputBusca.blur();
     buscarCartaoDireto(inputBusca.value);
   });
 
@@ -775,6 +776,19 @@ document.addEventListener("DOMContentLoaded", () => {
     loadListaRapida("");
     inputBusca.focus();
   });
+
+  // Botão Mobile para voltar rápido à busca de cartão
+  document
+    .getElementById("btn-mobile-voltar-busca")
+    .addEventListener("click", () => {
+      document
+        .getElementById("panel-busca-cartao")
+        .scrollIntoView({ behavior: "smooth", block: "start" });
+      setTimeout(() => {
+        inputBusca.focus();
+        inputBusca.select();
+      }, 300);
+    });
 
   // Atalho global F2 para focar imediatamente na busca de cartão
   document.addEventListener("keydown", (e) => {
@@ -792,7 +806,6 @@ document.addEventListener("DOMContentLoaded", () => {
       const inputVal = document.getElementById("input-valor-estadia");
       inputVal.value = btn.getAttribute("data-val");
       updateSimulacao();
-      inputVal.focus();
     });
   });
 
@@ -801,7 +814,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const inputVal = document.getElementById("input-valor-estadia");
     inputVal.value = state.currentCard.saldo.toFixed(2).replace(".", ",");
     updateSimulacao();
-    inputVal.focus();
   });
 
   document
@@ -845,7 +857,12 @@ document.addEventListener("DOMContentLoaded", () => {
     .addEventListener("click", () => {
       document.getElementById("last-receipt-banner").classList.add("hidden");
       inputBusca.value = "";
-      inputBusca.focus();
+      if (window.innerWidth <= 980) {
+        document
+          .getElementById("panel-busca-cartao")
+          .scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      setTimeout(() => inputBusca.focus(), 250);
     });
 
   // Filtro de Histórico Geral
@@ -919,4 +936,3 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
 });
-
