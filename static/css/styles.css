@@ -149,9 +149,6 @@ body {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 0.85rem;
-  position: sticky;
-  top: 0;
-  z-index: 50;
 }
 
 .topbar-header-row {
@@ -973,6 +970,12 @@ body {
 
   .topbar-header-row {
     width: 100%;
+    gap: 0.5rem;
+  }
+
+  .topbar-title {
+    font-size: 0.92rem;
+    white-space: nowrap;
   }
 
   .topbar-subtitle {
@@ -980,9 +983,9 @@ body {
   }
 
   .operator-badge {
-    padding: 0.25rem 0.6rem;
-    font-size: 0.78rem;
-    max-width: 165px;
+    padding: 0.25rem 0.55rem;
+    font-size: 0.75rem;
+    max-width: 150px;
   }
 
   #current-user-name {
