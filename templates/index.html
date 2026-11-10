@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Controle de Saldos Remanescentes — Estacionamento</title>
+  <link rel="stylesheet" href="/static/css/styles.css" />
+</head>
+<body>
+
+  <!-- ==================== TELA DE LOGIN ==================== -->
+  <div id="login-screen" class="login-wrapper">
+    <div class="login-card">
+      <div class="brand-header">
+        <div class="brand-icon">P</div>
+        <div class="brand-title">
+          <h1>Cartões Pré-Pagos</h1>
+          <p>Controle de Saldos Remanescentes de Estacionamento</p>
+        </div>
+      </div>
+
+      <span class="user-chips-label">Acesso rápido — Selecione o Operador(a):</span>
+      <div id="login-user-chips" class="user-chips"></div>
+
+      <form id="login-form">
+        <div class="form-group">
+          <label class="form-label" for="login-username">Usuário / Operadora</label>
+          <input type="text" id="login-username" class="form-input" placeholder="Ex: caixa1 ou admin" required autocomplete="username" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="login-password">Senha</label>
+          <input type="password" id="login-password" class="form-input" placeholder="Digite sua senha" required autocomplete="current-password" />
+        </div>
+        <button type="submit" class="btn btn-primary btn-block" style="margin-top: 0.5rem;">
+          Entrar no Sistema
+        </button>
+      </form>
+
+      <div style="margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border-color); font-size: 0.8rem; color: var(--text-muted);">
+        <strong>Acessos iniciais:</strong><br/>
+        • Operadoras: <code>caixa1</code> ou <code>caixa2</code> (Senha: <code>1234</code>)<br/>
+        • Administrador: <code>admin</code> (Senha: <code>admin123</code>)
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== APLICAÇÃO PRINCIPAL ==================== -->
+  <div id="app-screen" class="hidden">
+    <header class="topbar">
+      <div class="topbar-left">
+        <div style="display: flex; align-items: center; gap: 0.7rem;">
+          <div class="brand-icon" style="width: 38px; height: 38px; font-size: 1.15rem;">P</div>
+          <div>
+            <div style="font-weight: 800; font-size: 1rem; line-height: 1.1;">Saldos de Cartões</div>
+            <div style="font-size: 0.75rem; color: var(--text-muted);">Atendimento de Caixa</div>
+          </div>
+        </div>
+
+        <nav class="nav-tabs">
+          <button type="button" class="nav-tab active" data-tab="tab-pdv">Frente de Caixa (F2)</button>
+          <button type="button" class="nav-tab" data-tab="tab-historico">Histórico de Baixas</button>
+          <button type="button" class="nav-tab" data-tab="tab-cartoes">Base de Cartões</button>
+          <button type="button" id="nav-tab-admin" class="nav-tab hidden" data-tab="tab-admin">Administração</button>
+        </nav>
+      </div>
+
+      <div class="topbar-right">
+        <div class="operator-badge">
+          <span id="current-user-name">Operadora</span>
+          <span id="current-user-role" class="role-pill">CAIXA</span>
+        </div>
+        <button type="button" id="btn-logout" class="btn btn-outline" style="padding: 0.45rem 0.85rem; font-size: 0.85rem;">
+          Trocar Operador / Sair
+        </button>
+      </div>
+    </header>
+
+    <main class="container">
+      <!-- KPIs Rápidos -->
+      <section class="kpi-grid">
+        <div class="kpi-card">
+          <div class="kpi-label">Cartões com Saldo Ativo</div>
+          <div id="kpi-cartoes-ativos" class="kpi-value">—</div>
+          <div id="kpi-cartoes-zerados" class="kpi-sub">de — cartões cadastrados</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Saldo Total Remanescente</div>
+          <div id="kpi-saldo-total" class="kpi-value" style="color: #38bdf8;">R$ 0,00</div>
+          <div id="kpi-total-utilizado" class="kpi-sub">Já descontado: R$ 0,00</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Descontado Hoje (Geral)</div>
+          <div id="kpi-descontado-hoje" class="kpi-value" style="color: #34d399;">R$ 0,00</div>
+          <div id="kpi-atendimentos-hoje" class="kpi-sub">0 atendimentos hoje</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Meu Caixa Hoje</div>
+          <div id="kpi-meu-descontado" class="kpi-value" style="color: #fbbf24;">R$ 0,00</div>
+          <div id="kpi-meu-complemento" class="kpi-sub">Compl. cobrado no caixa: R$ 0,00</div>
+        </div>
+      </section>
+
+      <!-- ==================== ABA 1: FRENTE DE CAIXA (PDV) ==================== -->
+      <section id="tab-pdv" class="tab-content">
+        <div class="pdv-grid">
+          <!-- Coluna Esquerda: Busca Rápida do Cartão -->
+          <div class="panel">
+            <div class="panel-title">
+              <span>1. Consultar Cartão</span>
+              <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: 500;">Atalho: F2</span>
+            </div>
+
+            <form id="form-busca-rapida">
+              <div class="form-group">
+                <label class="form-label" for="input-numero-cartao">Número do Cartão ou Nome do Cliente</label>
+                <div style="display: flex; gap: 0.5rem;">
+                  <input
+                    type="text"
+                    id="input-numero-cartao"
+                    class="form-input input-lg"
+                    placeholder="Ex: 4532"
+                    autocomplete="off"
+                    autofocus
+                  />
+                  <button type="submit" class="btn btn-primary" style="padding: 0 1.25rem;">
+                    Buscar
+                  </button>
+                </div>
+              </div>
+            </form>
+
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0.5rem;">
+              <span style="font-size: 0.8rem; color: var(--text-muted);" id="search-results-label">Resultados da busca:</span>
+              <button type="button" id="btn-limpar-busca" class="btn btn-outline" style="padding: 0.2rem 0.6rem; font-size: 0.75rem;">
+                Limpar
+              </button>
+            </div>
+
+            <div id="lista-resultados-rapidos" class="search-results-list"></div>
+          </div>
+
+          <!-- Coluna Direita: Detalhes do Cartão e Baixa de Estadia -->
+          <div class="panel">
+            <!-- Estado Vazio (Nenhum cartão selecionado) -->
+            <div id="pdv-empty-state" class="empty-state">
+              <div class="empty-state-icon">💳</div>
+              <h3 style="color: var(--text-main); margin-bottom: 0.4rem;">Nenhum Cartão Selecionado</h3>
+              <p>Digite o <strong>número do cartão</strong> no campo ao lado e pressione <strong>Enter</strong> para consultar o saldo remanescente e realizar a baixa da estadia.</p>
+            </div>
+
+            <!-- Conteúdo do Cartão Selecionado -->
+            <div id="pdv-card-content" class="hidden">
+              <!-- Alerta se houver mais de um registro com o mesmo número na planilha -->
+              <div id="pdv-duplicate-warning" class="hidden" style="background: var(--warning-bg); border: 1px solid var(--warning); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.88rem;">
+                <strong>Atenção:</strong> Existem múltiplos registros para este número de cartão na planilha original. Selecione qual deseja operar:
+                <div id="pdv-duplicate-buttons" style="display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap;"></div>
+              </div>
+
+              <!-- Resumo da última baixa realizada nesta sessão -->
+              <div id="last-receipt-banner" class="receipt-banner hidden">
+                <div>
+                  <div style="font-weight: 800; color: #34d399; font-size: 0.95rem;" id="receipt-title">✅ Baixa Realizada com Sucesso!</div>
+                  <div style="font-size: 0.88rem; margin-top: 0.2rem;" id="receipt-details"></div>
+                </div>
+                <div style="display: flex; gap: 0.5rem;">
+                  <button type="button" id="btn-print-receipt" class="btn btn-outline" style="padding: 0.4rem 0.8rem; font-size: 0.82rem;">
+                    🖨️ Imprimir Comprovante
+                  </button>
+                  <button type="button" id="btn-novo-atendimento" class="btn btn-primary" style="padding: 0.4rem 0.85rem; font-size: 0.82rem;">
+                    Novo Atendimento (F2)
+                  </button>
+                </div>
+              </div>
+
+              <!-- Cabeçalho do Cartão -->
+              <div class="card-banner">
+                <div>
+                  <div class="card-number-badge">CARTÃO PRÉ-PAGO</div>
+                  <div class="card-number-big" id="card-display-numero">Nº —</div>
+                  <div class="card-meta-row">
+                    <span><strong>Grupo:</strong> <span id="card-display-grupo">1</span></span>
+                    <span>•</span>
+                    <span><strong>Saldo Inicial:</strong> <span id="card-display-saldo-inicial">R$ 0,00</span></span>
+                    <span>•</span>
+                    <span><strong>Vigência:</strong> <span id="card-display-datas">—</span></span>
+                  </div>
+                </div>
+
+                <div id="card-balance-container" class="card-balance-box has-balance">
+                  <div class="card-balance-label">SALDO DISPONÍVEL</div>
+                  <div class="card-balance-value" id="card-display-saldo">R$ 0,00</div>
+                </div>
+              </div>
+
+              <!-- Identificação do Cliente -->
+              <div style="background: rgba(15, 23, 42, 0.45); border: 1px solid var(--border-color); border-radius: 10px; padding: 0.95rem 1.1rem; margin-bottom: 1.25rem;">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap;">
+                  <div style="flex: 1; min-width: 240px;">
+                    <label class="form-label" for="input-card-nome" style="margin-bottom: 0.25rem;">
+                      Nome do Cliente / Titular <span id="badge-atualizar-cadastro" class="badge badge-parcial hidden" style="margin-left: 0.4rem;">Pendente de Atualização</span>
+                    </label>
+                    <div style="display: flex; gap: 0.5rem;">
+                      <input type="text" id="input-card-nome" class="form-input" placeholder="Informe o nome do cliente (opcional)" />
+                      <button type="button" id="btn-salvar-nome" class="btn btn-outline" style="white-space: nowrap;">
+                        Salvar Nome
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Formulário de Desconto de Estadia -->
+              <div id="box-operacao-baixa">
+                <div class="panel-title" style="margin-bottom: 0.75rem;">
+                  <span>2. Lançar Desconto da Estadia Atual</span>
+                </div>
+
+                <form id="form-baixa-estadia">
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                    <div class="form-group">
+                      <label class="form-label" for="input-valor-estadia">Valor da Estadia Atual (R$)</label>
+                      <input
+                        type="text"
+                        id="input-valor-estadia"
+                        class="form-input input-lg"
+                        placeholder="0,00"
+                        autocomplete="off"
+                        required
+                      />
+                      <div class="quick-amounts">
+                        <button type="button" class="quick-btn" data-val="10,00">R$ 10</button>
+                        <button type="button" class="quick-btn" data-val="12,00">R$ 12</button>
+                        <button type="button" class="quick-btn" data-val="15,00">R$ 15</button>
+                        <button type="button" class="quick-btn" data-val="20,00">R$ 20</button>
+                        <button type="button" class="quick-btn" data-val="25,00">R$ 25</button>
+                        <button type="button" class="quick-btn" data-val="30,00">R$ 30</button>
+                        <button type="button" class="quick-btn" id="btn-usar-saldo-total">Usar Saldo Total</button>
+                      </div>
+                    </div>
+
+                    <div class="form-group">
+                      <label class="form-label" for="input-obs-estadia">Observação / Placa / Ticket (Opcional)</label>
+                      <input
+                        type="text"
+                        id="input-obs-estadia"
+                        class="form-input"
+                        placeholder="Ex: Placa ABC-1234 ou Ticket #9821"
+                        style="height: 54px;"
+                      />
+                    </div>
+                  </div>
+
+                  <!-- Caixa de Simulação Automática antes de Confirmar -->
+                  <div id="simulation-container" class="simulation-box sim-ok hidden">
+                    <div id="sim-title" class="sim-title">Simulação do Desconto</div>
+                    <div class="sim-grid">
+                      <div class="sim-item">
+                        <div class="sim-item-label">Descontar do Cartão</div>
+                        <div id="sim-desconto-cartao" class="sim-item-val" style="color: #38bdf8;">R$ 0,00</div>
+                      </div>
+                      <div class="sim-item">
+                        <div class="sim-item-label">Novo Saldo do Cartão</div>
+                        <div id="sim-novo-saldo" class="sim-item-val" style="color: #34d399;">R$ 0,00</div>
+                      </div>
+                      <div class="sim-item">
+                        <div class="sim-item-label">Diferença a Cobrar no Caixa</div>
+                        <div id="sim-cobrar-caixa" class="sim-item-val">R$ 0,00</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button type="submit" id="btn-confirmar-baixa" class="btn btn-success btn-block">
+                    Confirmar Desconto de Saldo
+                  </button>
+                </form>
+              </div>
+
+              <!-- Aviso quando o cartão já está zerado -->
+              <div id="box-cartao-zerado" class="hidden" style="background: var(--danger-bg); border: 1px solid rgba(239, 68, 68, 0.4); padding: 1.25rem; border-radius: 12px; text-align: center; margin-bottom: 1.25rem;">
+                <strong style="color: #f87171; font-size: 1.1rem;">🚫 Este cartão já está com o saldo totalmente ZERADO (R$ 0,00).</strong>
+                <p style="font-size: 0.9rem; color: var(--text-muted); margin-top: 0.3rem;">Confira abaixo o histórico de utilizações deste cartão.</p>
+              </div>
+
+              <!-- Histórico de Movimentações deste Cartão -->
+              <div style="margin-top: 1.75rem;">
+                <div class="panel-title">
+                  <span>Histórico de Utilizações deste Cartão</span>
+                </div>
+                <div class="table-responsive">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th>Data / Hora</th>
+                        <th>Operadora</th>
+                        <th>Tipo</th>
+                        <th>Estadia</th>
+                        <th>Descontado</th>
+                        <th>Cobrado Caixa</th>
+                        <th>Saldo Após</th>
+                        <th>Obs</th>
+                        <th>Ação</th>
+                      </tr>
+                    </thead>
+                    <tbody id="tbody-card-history"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== ABA 2: HISTÓRICO GERAL DE BAIXAS ==================== -->
+      <section id="tab-historico" class="tab-content hidden">
+        <div class="panel">
+          <div class="panel-title">
+            <span>Histórico Geral de Baixas e Auditoria de Caixa</span>
+            <button type="button" id="btn-exportar-movimentacoes" class="btn btn-outline" style="font-size: 0.85rem;">
+              📥 Exportar Extrato (.xlsx)
+            </button>
+          </div>
+
+          <form id="form-filtro-historico" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0.85rem; margin-bottom: 1.25rem; align-items: end;">
+            <div>
+              <label class="form-label">Data Inicial</label>
+              <input type="date" id="filtro-mov-inicio" class="form-input" />
+            </div>
+            <div>
+              <label class="form-label">Data Final</label>
+              <input type="date" id="filtro-mov-fim" class="form-input" />
+            </div>
+            <div>
+              <label class="form-label">Nº do Cartão</label>
+              <input type="text" id="filtro-mov-cartao" class="form-input" placeholder="Todos" />
+            </div>
+            <div>
+              <button type="submit" class="btn btn-primary btn-block">Filtrar Histórico</button>
+            </div>
+          </form>
+
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Data / Hora</th>
+                  <th>Cartão Nº</th>
+                  <th>Operadora</th>
+                  <th>Tipo</th>
+                  <th>Valor Estadia</th>
+                  <th>Descontado Cartão</th>
+                  <th>Cobrado no Caixa</th>
+                  <th>Saldo Anterior → Final</th>
+                  <th>Observação</th>
+                  <th>Ação</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-historico-geral"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== ABA 3: BASE DE CARTÕES ==================== -->
+      <section id="tab-cartoes" class="tab-content hidden">
+        <div class="panel">
+          <div class="panel-title">
+            <span>Base Completa de Cartões (Planilha Importada)</span>
+            <a href="/api/exportar/saldos" class="btn btn-primary" style="text-decoration: none; font-size: 0.85rem;">
+              📥 Baixar Planilha Atualizada (.xlsx)
+            </a>
+          </div>
+
+          <form id="form-filtro-cartoes" style="display: grid; grid-template-columns: 1fr 220px 160px; gap: 0.85rem; margin-bottom: 1.25rem; align-items: end;">
+            <div>
+              <label class="form-label">Pesquisar por Número ou Nome</label>
+              <input type="text" id="filtro-base-termo" class="form-input" placeholder="Digite o número do cartão ou nome do cliente..." />
+            </div>
+            <div>
+              <label class="form-label">Situação do Saldo</label>
+              <select id="filtro-base-saldo" class="form-select">
+                <option value="todos">Todos os Cartões</option>
+                <option value="com_saldo">Com Saldo Disponível (&gt; R$ 0)</option>
+                <option value="zerados">Saldo Zerado (R$ 0,00)</option>
+              </select>
+            </div>
+            <div>
+              <button type="submit" class="btn btn-primary btn-block">Pesquisar</button>
+            </div>
+          </form>
+
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Cartão Nº</th>
+                  <th>Grupo</th>
+                  <th>Nome / Cadastro</th>
+                  <th>Saldo Inicial</th>
+                  <th>Saldo Atual</th>
+                  <th>Início</th>
+                  <th>Fim</th>
+                  <th>Ação</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-base-cartoes"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== ABA 4: ADMINISTRAÇÃO ==================== -->
+      <section id="tab-admin" class="tab-content hidden">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 1.5rem;">
+          <!-- Cadastro de Nova Operadora -->
+          <div class="panel">
+            <div class="panel-title">Cadastrar Operadora de Caixa / Usuário</div>
+            <form id="form-novo-usuario">
+              <div class="form-group">
+                <label class="form-label">Login de Acesso (sem espaços)</label>
+                <input type="text" id="novo-user-login" class="form-input" placeholder="Ex: maria ou caixa3" required />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Nome Completo da Operadora</label>
+                <input type="text" id="novo-user-nome" class="form-input" placeholder="Ex: Maria Silva (Caixa Manhã)" required />
+              </div>
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.85rem;">
+                <div class="form-group">
+                  <label class="form-label">Senha</label>
+                  <input type="password" id="novo-user-senha" class="form-input" placeholder="Senha de acesso" required />
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Perfil</label>
+                  <select id="novo-user-perfil" class="form-select">
+                    <option value="operadora">Operadora de Caixa</option>
+                    <option value="admin">Administrador</option>
+                  </select>
+                </div>
+              </div>
+              <button type="submit" class="btn btn-primary btn-block">Cadastrar Operadora</button>
+            </form>
+
+            <div style="margin-top: 1.5rem;">
+              <div class="panel-title" style="font-size: 0.95rem;">Operadoras Cadastradas</div>
+              <div class="table-responsive">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Login</th>
+                      <th>Nome</th>
+                      <th>Perfil</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tbody-usuarios"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Cadastro Manual de Cartão -->
+          <div class="panel">
+            <div class="panel-title">Adicionar Cartão Manualmente</div>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+              Caso um cliente apresente um cartão físico que não constava na planilha inicial, o administrador pode cadastrá-lo aqui.
+            </p>
+            <form id="form-novo-cartao">
+              <div style="display: grid; grid-template-columns: 1fr 120px; gap: 0.85rem;">
+                <div class="form-group">
+                  <label class="form-label">Número do Cartão</label>
+                  <input type="number" id="novo-cartao-numero" class="form-input" placeholder="Ex: 60123" required />
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Grupo</label>
+                  <input type="number" id="novo-cartao-grupo" class="form-input" value="1" required />
+                </div>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Saldo Remanescente (R$)</label>
+                <input type="text" id="novo-cartao-saldo" class="form-input" placeholder="Ex: 45,00" required />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Nome do Cliente</label>
+                <input type="text" id="novo-cartao-nome" class="form-input" placeholder="Nome do titular" />
+              </div>
+              <button type="submit" class="btn btn-primary btn-block">Salvar Novo Cartão</button>
+            </form>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
+
