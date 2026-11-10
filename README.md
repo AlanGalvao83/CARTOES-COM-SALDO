@@ -19,3 +19,4 @@ Aplicação Web Fullstack (Python/Flask + SQLite) para consulta e baixa de saldo
    python app.py
    ```
 3. Acesse `http://localhost:5000`.
+

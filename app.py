@@ -1,4 +1,5 @@
 import os
+import shutil
 import sqlite3
 from datetime import datetime
 from functools import wraps
@@ -6,27 +7,96 @@ from io import BytesIO
 from flask import (
     Flask,
     jsonify,
-     render_template,
+    render_template,
     request,
     send_file,
     session,
 )
+import requests
 from werkzeug.security import check_password_hash, generate_password_hash
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DB_PATH = os.path.join(BASE_DIR, "estacionamento.db")
 EXCEL_PATH = os.path.join(BASE_DIR, "RELATÓRIO DE DEFINIÇÃO DE CARTOES.xlsx")
+
+
+def load_env_file():
+    env_path = os.path.join(BASE_DIR, ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
+
+
+load_env_file()
+
+SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip().rstrip("/")
+SUPABASE_KEY = (
+    os.environ.get("SUPABASE_SECRET_KEY")
+    or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    or os.environ.get("SUPABASE_PUBLISHABLE_KEY")
+    or ""
+).strip()
+
+# Em ambiente Serverless (Vercel), o diretório raiz é somente leitura; usamos /tmp para fallback SQLite
+IS_VERCEL = bool(os.environ.get("VERCEL"))
+if IS_VERCEL:
+    BUNDLED_DB = os.path.join(BASE_DIR, "estacionamento.db")
+    DB_PATH = "/tmp/estacionamento.db"
+    if os.path.exists(BUNDLED_DB) and not os.path.exists(DB_PATH):
+        try:
+            shutil.copy2(BUNDLED_DB, DB_PATH)
+        except Exception:
+            pass
+else:
+    DB_PATH = os.path.join(BASE_DIR, "estacionamento.db")
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "estacionamento-cartoes-saldo-secret-2026")
+
+_SUPABASE_READY = None
+
+
+def sb_headers(prefer=None):
+    h = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if prefer:
+        h["Prefer"] = prefer
+    return h
+
+
+def use_supabase():
+    global _SUPABASE_READY
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return False
+    if _SUPABASE_READY is True:
+        return True
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/usuarios?select=id&limit=1",
+            headers=sb_headers(),
+            timeout=4,
+        )
+        if r.status_code == 200:
+            _SUPABASE_READY = True
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=15.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    if not IS_VERCEL:
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -53,10 +123,17 @@ def from_cents(cents):
 
 
 def init_db():
+    if use_supabase():
+        try:
+            from migrar_para_supabase import migrar
+            migrar()
+        except Exception:
+            pass
+        return
+
     conn = get_db()
     cur = conn.cursor()
 
-    # Tabela de usuários (operadoras de caixa e administradores)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS usuarios (
@@ -64,14 +141,13 @@ def init_db():
             username TEXT UNIQUE NOT NULL,
             nome TEXT NOT NULL,
             senha_hash TEXT NOT NULL,
-            perfil TEXT NOT NULL DEFAULT 'operadora', -- 'admin' ou 'operadora'
+            perfil TEXT NOT NULL DEFAULT 'operadora',
             ativo INTEGER NOT NULL DEFAULT 1,
             criado_em TEXT NOT NULL
         )
         """
     )
 
-    # Tabela de cartões
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS cartoes (
@@ -91,7 +167,6 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_cartoes_numero ON cartoes(numero)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_cartoes_nome ON cartoes(nome)")
 
-    # Tabela de movimentações (histórico de descontos, ajustes e estornos)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS movimentacoes (
@@ -100,7 +175,7 @@ def init_db():
             cartao_numero INTEGER NOT NULL,
             usuario_id INTEGER NOT NULL,
             usuario_nome TEXT NOT NULL,
-            tipo TEXT NOT NULL, -- 'BAIXA_TOTAL', 'BAIXA_PARCIAL', 'ESTORNO', 'AJUSTE_ADMIN'
+            tipo TEXT NOT NULL,
             valor_estadia_centavos INTEGER NOT NULL,
             valor_descontado_centavos INTEGER NOT NULL,
             valor_complemento_caixa_centavos INTEGER NOT NULL DEFAULT 0,
@@ -120,7 +195,6 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_mov_cartao_num ON movimentacoes(cartao_numero)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_mov_criado_em ON movimentacoes(criado_em)")
 
-    # Criar usuários padrão se a tabela estiver vazia
     cur.execute("SELECT COUNT(*) FROM usuarios")
     if cur.fetchone()[0] == 0:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -138,7 +212,6 @@ def init_db():
         )
         conn.commit()
 
-    # Importar planilha automaticamente se a tabela de cartões estiver vazia
     cur.execute("SELECT COUNT(*) FROM cartoes")
     if cur.fetchone()[0] == 0 and os.path.exists(EXCEL_PATH):
         import_excel_to_db(conn, EXCEL_PATH)
@@ -150,7 +223,7 @@ def import_excel_to_db(conn, filepath):
     wb = openpyxl.load_workbook(filepath, read_only=True)
     ws = wb.active
     rows = ws.iter_rows(values_only=True)
-    header = next(rows, None)  # pula cabeçalho ('NÚMERO', 'GRUPO', 'SALDO', 'INÍCIO', 'FIM', 'NOME')
+    next(rows, None)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     batch = []
@@ -204,6 +277,8 @@ def admin_required(f):
 
 
 def serialize_cartao(row):
+    nome = row.get("nome") if isinstance(row, dict) else row["nome"]
+    nome_str = nome or ""
     return {
         "id": row["id"],
         "numero": row["numero"],
@@ -213,10 +288,10 @@ def serialize_cartao(row):
         "saldo_centavos": row["saldo_centavos"],
         "data_inicio": row["data_inicio"] or "",
         "data_fim": row["data_fim"] or "",
-        "nome": row["nome"] or "",
+        "nome": nome_str,
         "observacao": row["observacao"] or "",
         "atualizado_em": row["atualizado_em"] or "",
-        "precisa_atualizar_nome": (not row["nome"]) or (row["nome"].strip().upper() == "ATUALIZAÇÃO DE CADASTRO"),
+        "precisa_atualizar_nome": (not nome_str) or (nome_str.strip().upper() == "ATUALIZAÇÃO DE CADASTRO"),
     }
 
 
@@ -241,6 +316,13 @@ def serialize_movimentacao(row):
     }
 
 
+@app.before_request
+def ensure_initialized():
+    if not getattr(app, "_db_initialized", False):
+        init_db()
+        app._db_initialized = True
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -256,11 +338,21 @@ def api_login():
     if not username or not password:
         return jsonify({"error": "Informe o usuário e a senha."}), 400
 
-    conn = get_db()
-    user = conn.execute(
-        "SELECT * FROM usuarios WHERE LOWER(username) = ? AND ativo = 1", (username,)
-    ).fetchone()
-    conn.close()
+    if use_supabase():
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/usuarios",
+            headers=sb_headers(),
+            params={"username": f"eq.{username}", "ativo": "eq.1", "limit": "1"},
+            timeout=10,
+        )
+        rows = r.json() if r.status_code == 200 else []
+        user = rows[0] if rows else None
+    else:
+        conn = get_db()
+        user = conn.execute(
+            "SELECT * FROM usuarios WHERE LOWER(username) = ? AND ativo = 1", (username,)
+        ).fetchone()
+        conn.close()
 
     if not user or not check_password_hash(user["senha_hash"], password):
         return jsonify({"error": "Usuário ou senha inválidos."}), 401
@@ -291,21 +383,37 @@ def api_logout():
 @app.route("/api/auth/me", methods=["GET"])
 def api_me():
     if "user_id" not in session:
-        # Lista os usernames ativos para facilitar a seleção rápida no login do caixa
-        conn = get_db()
-        users = conn.execute(
-            "SELECT username, nome, perfil FROM usuarios WHERE ativo = 1 ORDER BY perfil DESC, nome ASC"
-        ).fetchall()
-        conn.close()
+        if use_supabase():
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/usuarios",
+                headers=sb_headers(),
+                params={
+                    "select": "username,nome,perfil",
+                    "ativo": "eq.1",
+                    "order": "perfil.desc,nome.asc",
+                },
+                timeout=10,
+            )
+            users = r.json() if r.status_code == 200 else []
+        else:
+            conn = get_db()
+            rows = conn.execute(
+                "SELECT username, nome, perfil FROM usuarios WHERE ativo = 1 ORDER BY perfil DESC, nome ASC"
+            ).fetchall()
+            conn.close()
+            users = [dict(u) for u in rows]
+
         return jsonify(
             {
                 "authenticated": False,
-                "available_users": [dict(u) for u in users],
+                "available_users": users,
+                "storage_mode": "supabase" if use_supabase() else "sqlite",
             }
         )
     return jsonify(
         {
             "authenticated": True,
+            "storage_mode": "supabase" if use_supabase() else "sqlite",
             "user": {
                 "id": session["user_id"],
                 "username": session["username"],
@@ -321,8 +429,57 @@ def api_me():
 @login_required
 def api_buscar_cartoes():
     termo = (request.args.get("q") or "").strip()
-    filtro_saldo = request.args.get("saldo", "todos")  # 'todos', 'com_saldo', 'zerados'
+    filtro_saldo = request.args.get("saldo", "todos")
     limit = min(int(request.args.get("limit", 30)), 100)
+
+    if use_supabase():
+        params = {"order": "numero.asc", "limit": str(limit)}
+        if filtro_saldo == "com_saldo":
+            params["saldo_centavos"] = "gt.0"
+        elif filtro_saldo == "zerados":
+            params["saldo_centavos"] = "eq.0"
+
+        if termo:
+            if termo.isdigit():
+                params["numero"] = f"eq.{int(termo)}"
+                r_exact = requests.get(
+                    f"{SUPABASE_URL}/rest/v1/cartoes",
+                    headers=sb_headers(),
+                    params=params,
+                    timeout=10,
+                )
+                exact_rows = r_exact.json() if r_exact.status_code == 200 else []
+                del params["numero"]
+                params["numero"] = f"gte.{int(termo)}"
+                r_range = requests.get(
+                    f"{SUPABASE_URL}/rest/v1/cartoes",
+                    headers=sb_headers(),
+                    params=params,
+                    timeout=10,
+                )
+                range_rows = r_range.json() if r_range.status_code == 200 else []
+                seen = {x["id"] for x in exact_rows}
+                rows = exact_rows + [x for x in range_rows if x["id"] not in seen]
+                rows = rows[:limit]
+            else:
+                params["nome"] = f"ilike.*{termo}*"
+                r = requests.get(
+                    f"{SUPABASE_URL}/rest/v1/cartoes",
+                    headers=sb_headers(),
+                    params=params,
+                    timeout=10,
+                )
+                rows = r.json() if r.status_code == 200 else []
+        else:
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/cartoes",
+                headers=sb_headers(),
+                params=params,
+                timeout=10,
+            )
+            rows = r.json() if r.status_code == 200 else []
+
+        return jsonify({"cartoes": [serialize_cartao(r) for r in rows]})
 
     conn = get_db()
     params = []
@@ -330,7 +487,6 @@ def api_buscar_cartoes():
 
     if termo:
         if termo.isdigit():
-            # Busca exata primeiro ou parcial por número
             where_clauses.append("(CAST(numero AS TEXT) LIKE ? OR UPPER(nome) LIKE ?)")
             params.extend([f"{termo}%", f"%{termo.upper()}%"])
         else:
@@ -344,7 +500,6 @@ def api_buscar_cartoes():
 
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    # Se o termo for um número, prioriza correspondência exata na ordenação
     if termo.isdigit():
         order_sql = "ORDER BY CASE WHEN numero = ? THEN 0 ELSE 1 END, numero ASC"
         params.append(int(termo))
@@ -363,6 +518,38 @@ def api_buscar_cartoes():
 @app.route("/api/cartoes/numero/<int:numero>", methods=["GET"])
 @login_required
 def api_cartao_por_numero(numero):
+    if use_supabase():
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/cartoes",
+            headers=sb_headers(),
+            params={"numero": f"eq.{numero}", "order": "saldo_centavos.desc,id.asc"},
+            timeout=10,
+        )
+        rows = r.json() if r.status_code == 200 else []
+        if not rows:
+            return jsonify({"error": f"Cartão nº {numero} não encontrado na base de dados."}), 404
+
+        cartoes = [serialize_cartao(x) for x in rows]
+        cartao_principal = cartoes[0]
+        rm = requests.get(
+            f"{SUPABASE_URL}/rest/v1/movimentacoes",
+            headers=sb_headers(),
+            params={
+                "cartao_id": f"eq.{cartao_principal['id']}",
+                "order": "id.desc",
+                "limit": "50",
+            },
+            timeout=10,
+        )
+        movs = rm.json() if rm.status_code == 200 else []
+        return jsonify(
+            {
+                "cartao": cartao_principal,
+                "duplicados": cartoes if len(cartoes) > 1 else [],
+                "historico": [serialize_movimentacao(m) for m in movs],
+            }
+        )
+
     conn = get_db()
     rows = conn.execute(
         "SELECT * FROM cartoes WHERE numero = ? ORDER BY saldo_centavos DESC, id ASC",
@@ -374,7 +561,6 @@ def api_cartao_por_numero(numero):
         return jsonify({"error": f"Cartão nº {numero} não encontrado na base de dados."}), 404
 
     cartoes = [serialize_cartao(r) for r in rows]
-    # Carrega o histórico do primeiro cartão retornado
     cartao_principal = cartoes[0]
     movs = conn.execute(
         """
@@ -399,6 +585,42 @@ def api_cartao_por_numero(numero):
 @app.route("/api/cartoes/<int:cartao_id>", methods=["GET"])
 @login_required
 def api_cartao_por_id(cartao_id):
+    if use_supabase():
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/cartoes",
+            headers=sb_headers(),
+            params={"id": f"eq.{cartao_id}", "limit": "1"},
+            timeout=10,
+        )
+        rows = r.json() if r.status_code == 200 else []
+        if not rows:
+            return jsonify({"error": "Cartão não encontrado."}), 404
+        row = rows[0]
+
+        r_dups = requests.get(
+            f"{SUPABASE_URL}/rest/v1/cartoes",
+            headers=sb_headers(),
+            params={"numero": f"eq.{row['numero']}", "order": "saldo_centavos.desc,id.asc"},
+            timeout=10,
+        )
+        dups = r_dups.json() if r_dups.status_code == 200 else []
+
+        r_movs = requests.get(
+            f"{SUPABASE_URL}/rest/v1/movimentacoes",
+            headers=sb_headers(),
+            params={"cartao_id": f"eq.{cartao_id}", "order": "id.desc", "limit": "50"},
+            timeout=10,
+        )
+        movs = r_movs.json() if r_movs.status_code == 200 else []
+
+        return jsonify(
+            {
+                "cartao": serialize_cartao(row),
+                "duplicados": [serialize_cartao(d) for d in dups] if len(dups) > 1 else [],
+                "historico": [serialize_movimentacao(m) for m in movs],
+            }
+        )
+
     conn = get_db()
     row = conn.execute("SELECT * FROM cartoes WHERE id = ?", (cartao_id,)).fetchone()
     if not row:
@@ -440,6 +662,24 @@ def api_atualizar_cadastro_cartao(cartao_id):
         return jsonify({"error": "O nome do cliente não pode ficar vazio."}), 400
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if use_supabase():
+        r = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/cartoes?id=eq.{cartao_id}",
+            headers=sb_headers("return=representation"),
+            json={"nome": nome, "observacao": observacao, "atualizado_em": now},
+            timeout=10,
+        )
+        rows = r.json() if r.status_code in (200, 201) else []
+        if not rows:
+            return jsonify({"error": "Cartão não encontrado."}), 404
+        return jsonify(
+            {
+                "message": "Cadastro do cartão atualizado com sucesso!",
+                "cartao": serialize_cartao(rows[0]),
+            }
+        )
+
     conn = get_db()
     row = conn.execute("SELECT * FROM cartoes WHERE id = ?", (cartao_id,)).fetchone()
     if not row:
@@ -478,6 +718,84 @@ def api_descontar_saldo(cartao_id):
     if valor_estadia_centavos <= 0:
         return jsonify({"error": "Informe um valor de estadia maior que R$ 0,00."}), 400
 
+    if use_supabase():
+        rc = requests.get(
+            f"{SUPABASE_URL}/rest/v1/cartoes",
+            headers=sb_headers(),
+            params={"id": f"eq.{cartao_id}", "limit": "1"},
+            timeout=10,
+        )
+        rows = rc.json() if rc.status_code == 200 else []
+        if not rows:
+            return jsonify({"error": "Cartão não encontrado."}), 404
+        cartao = rows[0]
+        saldo_atual = cartao["saldo_centavos"]
+        if saldo_atual <= 0:
+            return jsonify(
+                {"error": f"O cartão nº {cartao['numero']} já está com saldo ZERADO (R$ 0,00)."}
+            ), 400
+
+        if valor_estadia_centavos <= saldo_atual:
+            tipo = "BAIXA_TOTAL"
+            valor_descontado = valor_estadia_centavos
+            valor_complemento_caixa = 0
+            novo_saldo = saldo_atual - valor_estadia_centavos
+        else:
+            tipo = "BAIXA_PARCIAL"
+            valor_descontado = saldo_atual
+            valor_complemento_caixa = valor_estadia_centavos - saldo_atual
+            novo_saldo = 0
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        novo_nome = nome_cliente if nome_cliente else cartao["nome"]
+
+        ru = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/cartoes?id=eq.{cartao_id}",
+            headers=sb_headers("return=representation"),
+            json={"saldo_centavos": novo_saldo, "nome": novo_nome, "atualizado_em": now},
+            timeout=10,
+        )
+        cartao_atualizado = ru.json()[0]
+
+        rm = requests.post(
+            f"{SUPABASE_URL}/rest/v1/movimentacoes",
+            headers=sb_headers("return=representation"),
+            json={
+                "cartao_id": cartao_id,
+                "cartao_numero": cartao["numero"],
+                "usuario_id": session["user_id"],
+                "usuario_nome": session["nome"],
+                "tipo": tipo,
+                "valor_estadia_centavos": valor_estadia_centavos,
+                "valor_descontado_centavos": valor_descontado,
+                "valor_complemento_caixa_centavos": valor_complemento_caixa,
+                "saldo_anterior_centavos": saldo_atual,
+                "saldo_posterior_centavos": novo_saldo,
+                "observacao": observacao,
+                "estornado": 0,
+                "criado_em": now,
+            },
+            timeout=10,
+        )
+        mov_criada = rm.json()[0]
+
+        rh = requests.get(
+            f"{SUPABASE_URL}/rest/v1/movimentacoes",
+            headers=sb_headers(),
+            params={"cartao_id": f"eq.{cartao_id}", "order": "id.desc", "limit": "50"},
+            timeout=10,
+        )
+        historico = rh.json() if rh.status_code == 200 else []
+
+        return jsonify(
+            {
+                "message": "Baixa realizada com sucesso!",
+                "cartao": serialize_cartao(cartao_atualizado),
+                "movimentacao": serialize_movimentacao(mov_criada),
+                "historico": [serialize_movimentacao(m) for m in historico],
+            }
+        )
+
     conn = get_db()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -495,7 +813,6 @@ def api_descontar_saldo(cartao_id):
                 {"error": f"O cartão nº {cartao['numero']} já está com saldo ZERADO (R$ 0,00)."}
             ), 400
 
-        # Verifica se é baixa total da estadia ou baixa parcial (quando estadia > saldo do cartão)
         if valor_estadia_centavos <= saldo_atual:
             tipo = "BAIXA_TOTAL"
             valor_descontado = valor_estadia_centavos
@@ -508,8 +825,6 @@ def api_descontar_saldo(cartao_id):
             novo_saldo = 0
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        # Se a operadora informou o nome do cliente junto da baixa, já atualiza
         novo_nome = nome_cliente if nome_cliente else cartao["nome"]
 
         conn.execute(
@@ -579,6 +894,100 @@ def api_descontar_saldo(cartao_id):
 def api_estornar_movimentacao(mov_id):
     data = request.get_json(silent=True) or {}
     motivo = (data.get("motivo") or "Estorno de lançamento").strip()
+    hoje = datetime.now().strftime("%Y-%m-%d")
+
+    if use_supabase():
+        rm = requests.get(
+            f"{SUPABASE_URL}/rest/v1/movimentacoes",
+            headers=sb_headers(),
+            params={"id": f"eq.{mov_id}", "limit": "1"},
+            timeout=10,
+        )
+        mrows = rm.json() if rm.status_code == 200 else []
+        if not mrows:
+            return jsonify({"error": "Movimentação não encontrada."}), 404
+        mov = mrows[0]
+
+        if mov["estornado"]:
+            return jsonify({"error": "Esta movimentação já foi estornada."}), 400
+        if mov["tipo"] == "ESTORNO":
+            return jsonify({"error": "Não é possível estornar um registro de estorno."}), 400
+        if session.get("perfil") != "admin" and not mov["criado_em"].startswith(hoje):
+            return jsonify(
+                {"error": "Apenas o Administrador pode estornar baixas de dias anteriores."}
+            ), 403
+
+        rc = requests.get(
+            f"{SUPABASE_URL}/rest/v1/cartoes",
+            headers=sb_headers(),
+            params={"id": f"eq.{mov['cartao_id']}", "limit": "1"},
+            timeout=10,
+        )
+        crows = rc.json() if rc.status_code == 200 else []
+        if not crows:
+            return jsonify({"error": "Cartão vinculado não encontrado."}), 404
+        cartao = crows[0]
+
+        saldo_atual = cartao["saldo_centavos"]
+        valor_devolvido = mov["valor_descontado_centavos"]
+        novo_saldo = saldo_atual + valor_devolvido
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        ru = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/cartoes?id=eq.{cartao['id']}",
+            headers=sb_headers("return=representation"),
+            json={"saldo_centavos": novo_saldo, "atualizado_em": now},
+            timeout=10,
+        )
+        cartao_atualizado = ru.json()[0]
+
+        requests.patch(
+            f"{SUPABASE_URL}/rest/v1/movimentacoes?id=eq.{mov_id}",
+            headers=sb_headers("return=minimal"),
+            json={
+                "estornado": 1,
+                "estornado_por_nome": session["nome"],
+                "estornado_em": now,
+            },
+            timeout=10,
+        )
+
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/movimentacoes",
+            headers=sb_headers("return=minimal"),
+            json={
+                "cartao_id": cartao["id"],
+                "cartao_numero": cartao["numero"],
+                "usuario_id": session["user_id"],
+                "usuario_nome": session["nome"],
+                "tipo": "ESTORNO",
+                "valor_estadia_centavos": 0,
+                "valor_descontado_centavos": valor_devolvido,
+                "valor_complemento_caixa_centavos": 0,
+                "saldo_anterior_centavos": saldo_atual,
+                "saldo_posterior_centavos": novo_saldo,
+                "observacao": f"Estorno ref. baixa #{mov_id}: {motivo}",
+                "estornado": 0,
+                "criado_em": now,
+            },
+            timeout=10,
+        )
+
+        rh = requests.get(
+            f"{SUPABASE_URL}/rest/v1/movimentacoes",
+            headers=sb_headers(),
+            params={"cartao_id": f"eq.{cartao['id']}", "order": "id.desc", "limit": "50"},
+            timeout=10,
+        )
+        historico = rh.json() if rh.status_code == 200 else []
+
+        return jsonify(
+            {
+                "message": f"Estorno realizado! R$ {from_cents(valor_devolvido):.2f} devolvido ao cartão nº {cartao['numero']}.",
+                "cartao": serialize_cartao(cartao_atualizado),
+                "historico": [serialize_movimentacao(m) for m in historico],
+            }
+        )
 
     conn = get_db()
     try:
@@ -599,8 +1008,6 @@ def api_estornar_movimentacao(mov_id):
             conn.close()
             return jsonify({"error": "Não é possível estornar um registro de estorno."}), 400
 
-        # Operadora comum só pode estornar lançamentos feitos no mesmo dia; Admin pode estornar qualquer um
-        hoje = datetime.now().strftime("%Y-%m-%d")
         if session.get("perfil") != "admin" and not mov["criado_em"].startswith(hoje):
             conn.rollback()
             conn.close()
@@ -621,13 +1028,11 @@ def api_estornar_movimentacao(mov_id):
         novo_saldo = saldo_atual + valor_devolvido
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Atualiza o cartão devolvendo o saldo
         conn.execute(
             "UPDATE cartoes SET saldo_centavos = ?, atualizado_em = ? WHERE id = ?",
             (novo_saldo, now, cartao["id"]),
         )
 
-        # Marca a movimentação original como estornada
         conn.execute(
             """
             UPDATE movimentacoes
@@ -637,7 +1042,6 @@ def api_estornar_movimentacao(mov_id):
             (session["nome"], now, mov_id),
         )
 
-        # Registra a entrada do estorno no histórico
         conn.execute(
             """
             INSERT INTO movimentacoes (
@@ -687,9 +1091,20 @@ def api_estornar_movimentacao(mov_id):
 @app.route("/api/resumo", methods=["GET"])
 @login_required
 def api_resumo():
-    conn = get_db()
     hoje = datetime.now().strftime("%Y-%m-%d")
 
+    if use_supabase():
+        # Tenta usar a função RPC obter_resumo_caixa se disponível
+        r_rpc = requests.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/obter_resumo_caixa",
+            headers=sb_headers(),
+            json={"p_hoje": hoje, "p_usuario_id": session["user_id"]},
+            timeout=10,
+        )
+        if r_rpc.status_code == 200 and isinstance(r_rpc.json(), dict):
+            return jsonify(r_rpc.json())
+
+    conn = get_db()
     stats_cartoes = conn.execute(
         """
         SELECT
@@ -763,6 +1178,26 @@ def api_listar_movimentacoes():
     usuario_id = (request.args.get("usuario_id") or "").strip()
     limit = min(int(request.args.get("limit", 100)), 500)
 
+    if use_supabase():
+        params = [("order", "id.desc"), ("limit", str(limit))]
+        if data_inicio:
+            params.append(("criado_em", f"gte.{data_inicio} 00:00:00"))
+        if data_fim:
+            params.append(("criado_em", f"lte.{data_fim} 23:59:59"))
+        if cartao_numero and cartao_numero.isdigit():
+            params.append(("cartao_numero", f"eq.{int(cartao_numero)}"))
+        if usuario_id and usuario_id.isdigit():
+            params.append(("usuario_id", f"eq.{int(usuario_id)}"))
+
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/movimentacoes",
+            headers=sb_headers(),
+            params=params,
+            timeout=10,
+        )
+        rows = r.json() if r.status_code == 200 else []
+        return jsonify({"movimentacoes": [serialize_movimentacao(x) for x in rows]})
+
     where = []
     params = []
 
@@ -795,6 +1230,16 @@ def api_listar_movimentacoes():
 @app.route("/api/usuarios", methods=["GET"])
 @login_required
 def api_listar_usuarios():
+    if use_supabase():
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/usuarios",
+            headers=sb_headers(),
+            params={"select": "id,username,nome,perfil,ativo,criado_em", "order": "id.asc"},
+            timeout=10,
+        )
+        rows = r.json() if r.status_code == 200 else []
+        return jsonify({"usuarios": rows})
+
     conn = get_db()
     rows = conn.execute(
         "SELECT id, username, nome, perfil, ativo, criado_em FROM usuarios ORDER BY id ASC"
@@ -816,6 +1261,25 @@ def api_criar_usuario():
         return jsonify({"error": "Preencha usuário (login), nome e senha."}), 400
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if use_supabase():
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/usuarios",
+            headers=sb_headers("return=representation"),
+            json={
+                "username": username,
+                "nome": nome,
+                "senha_hash": generate_password_hash(senha),
+                "perfil": perfil,
+                "ativo": 1,
+                "criado_em": now,
+            },
+            timeout=10,
+        )
+        if r.status_code not in (200, 201):
+            return jsonify({"error": f"O login '{username}' já está em uso ou ocorreu um erro."}), 400
+        return jsonify({"message": f"Operadora '{nome}' cadastrada com sucesso!"})
+
     conn = get_db()
     try:
         conn.execute(
@@ -831,39 +1295,6 @@ def api_criar_usuario():
     except sqlite3.IntegrityError:
         conn.close()
         return jsonify({"error": f"O login '{username}' já está em uso."}), 400
-
-
-@app.route("/api/usuarios/<int:user_id>", methods=["PUT"])
-@admin_required
-def api_atualizar_usuario(user_id):
-    data = request.get_json(silent=True) or {}
-    nome = (data.get("nome") or "").strip()
-    nova_senha = (data.get("senha") or "").strip()
-    perfil = data.get("perfil")
-    ativo = data.get("ativo")
-
-    conn = get_db()
-    user = conn.execute("SELECT * FROM usuarios WHERE id = ?", (user_id,)).fetchone()
-    if not user:
-        conn.close()
-        return jsonify({"error": "Usuário não encontrado."}), 404
-
-    novo_nome = nome if nome else user["nome"]
-    novo_perfil = perfil if perfil in ("operadora", "admin") else user["perfil"]
-    novo_ativo = int(bool(ativo)) if ativo is not None else user["ativo"]
-    nova_hash = generate_password_hash(nova_senha) if nova_senha else user["senha_hash"]
-
-    conn.execute(
-        """
-        UPDATE usuarios
-        SET nome = ?, senha_hash = ?, perfil = ?, ativo = ?
-        WHERE id = ?
-        """,
-        (novo_nome, nova_hash, novo_perfil, novo_ativo, user_id),
-    )
-    conn.commit()
-    conn.close()
-    return jsonify({"message": "Usuário atualizado com sucesso!"})
 
 
 @app.route("/api/cartoes/novo", methods=["POST"])
@@ -885,6 +1316,32 @@ def api_criar_cartao():
         return jsonify({"error": "O saldo não pode ser negativo."}), 400
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if use_supabase():
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/cartoes",
+            headers=sb_headers("return=representation"),
+            json={
+                "numero": int(numero),
+                "grupo": int(grupo or 1),
+                "saldo_inicial_centavos": saldo_cents,
+                "saldo_centavos": saldo_cents,
+                "data_inicio": data_inicio,
+                "data_fim": data_fim,
+                "nome": nome,
+                "observacao": "",
+                "atualizado_em": now,
+            },
+            timeout=10,
+        )
+        row = r.json()[0]
+        return jsonify(
+            {
+                "message": f"Cartão nº {numero} cadastrado com sucesso!",
+                "cartao": serialize_cartao(row),
+            }
+        )
+
     conn = get_db()
     cur = conn.execute(
         """
@@ -912,9 +1369,25 @@ def api_criar_cartao():
 @app.route("/api/exportar/saldos", methods=["GET"])
 @login_required
 def api_exportar_saldos():
-    conn = get_db()
-    rows = conn.execute("SELECT * FROM cartoes ORDER BY numero ASC").fetchall()
-    conn.close()
+    if use_supabase():
+        rows = []
+        offset = 0
+        while True:
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/cartoes",
+                headers=sb_headers(),
+                params={"order": "numero.asc", "limit": "1000", "offset": str(offset)},
+                timeout=15,
+            )
+            batch = r.json() if r.status_code == 200 else []
+            rows.extend(batch)
+            if len(batch) < 1000:
+                break
+            offset += 1000
+    else:
+        conn = get_db()
+        rows = conn.execute("SELECT * FROM cartoes ORDER BY numero ASC").fetchall()
+        conn.close()
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -963,21 +1436,35 @@ def api_exportar_movimentacoes():
     data_inicio = (request.args.get("data_inicio") or "").strip()
     data_fim = (request.args.get("data_fim") or "").strip()
 
-    where = []
-    params = []
-    if data_inicio:
-        where.append("criado_em >= ?")
-        params.append(f"{data_inicio} 00:00:00")
-    if data_fim:
-        where.append("criado_em <= ?")
-        params.append(f"{data_fim} 23:59:59")
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    if use_supabase():
+        params = [("order", "id.desc"), ("limit", "5000")]
+        if data_inicio:
+            params.append(("criado_em", f"gte.{data_inicio} 00:00:00"))
+        if data_fim:
+            params.append(("criado_em", f"lte.{data_fim} 23:59:59"))
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/movimentacoes",
+            headers=sb_headers(),
+            params=params,
+            timeout=15,
+        )
+        rows = r.json() if r.status_code == 200 else []
+    else:
+        where = []
+        params = []
+        if data_inicio:
+            where.append("criado_em >= ?")
+            params.append(f"{data_inicio} 00:00:00")
+        if data_fim:
+            where.append("criado_em <= ?")
+            params.append(f"{data_fim} 23:59:59")
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
-    conn = get_db()
-    rows = conn.execute(
-        f"SELECT * FROM movimentacoes {where_sql} ORDER BY id DESC", params
-    ).fetchall()
-    conn.close()
+        conn = get_db()
+        rows = conn.execute(
+            f"SELECT * FROM movimentacoes {where_sql} ORDER BY id DESC", params
+        ).fetchall()
+        conn.close()
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -1037,8 +1524,7 @@ def api_exportar_movimentacoes():
 
 
 if __name__ == "__main__":
-    print("Inicializando banco de dados e verificando planilha...")
+    print("Inicializando sistema...")
     init_db()
     print("Servidor iniciado! Acesse http://localhost:5000")
     app.run(host="0.0.0.0", port=5000, debug=False)
-
